@@ -1,93 +1,91 @@
 import streamlit as st
 import pandas as pd
 
-# --- CONFIGURAÇÃO DA INTERFACE ---
-st.set_page_config(page_title="Consolidador Manaus V1 - Gestão Corporativa", layout="wide")
+# --- CONFIGURAÇÃO PROFISSIONAL ---
+st.set_page_config(page_title="Gestão Logística Manaus V1", layout="wide")
 
-# IDs extraídos do seu link (GID) e o ID da planilha
-SHEET_ID = "1YHgMyjTzMwi3SgDG-FEpeEhzRCnX3p1NU_QAJMm_3QM"
+# Link base fornecido por você
+BASE_URL = "https://docs.google.com/spreadsheets/d/1YHgMyjTzMwi3SgDG-FEpeEhzRCnX3p1NU_QAJMm_3QM"
 
-# Mapeamento técnico das abas para exportação CSV direta
-LINKS_PLANILHAS = {
-    "Parcel": f"https://docs.google.com/spreadsheets/d/{SHEET_ID}/export?format=csv&gid=240810884",
-    "Forward": f"https://docs.google.com/spreadsheets/d/{SHEET_ID}/export?format=csv&gid=663185324",
-    "Return": f"https://docs.google.com/spreadsheets/d/{SHEET_ID}/export?format=csv&gid=1119561081"
+# IDs das abas (GIDs) identificados no seu link e estrutura
+GIDS = {
+    "Parcel": "240810884",
+    "Forward": "663185324",
+    "Return": "1119561081"
 }
 
-# Link de edição para o botão de acesso rápido
-LINK_EDITAVEL = f"https://docs.google.com/spreadsheets/d/{SHEET_ID}/edit"
+st.title("📊 Painel de Decisão Logística - Manaus")
 
-st.title("📊 Painel de Monitoramento: Stuck Orders Manaus")
-st.markdown("---")
-
-# Seção de Gerenciamento da Fonte de Dados
+# Cabeçalho de Gestão com Link Direto para Edição
 st.markdown(f"""
-    <div style="background-color: #f0f2f6; padding: 20px; border-radius: 10px; border-left: 5px solid #0068c9; margin-bottom: 25px;">
-        <span style="color: #31333f; font-weight: bold;">Gerenciamento de Dados (Manaus V1):</span>
-        <a href="{LINK_EDITAVEL}" target="_blank" style="margin-left: 15px; color: #0068c9; text-decoration: underline; font-weight: bold;">
-            Abrir Planilha no Google Sheets para Substituição de Dados
+    <div style="background-color: #f8f9fa; padding: 15px; border-radius: 8px; border-left: 5px solid #007bff; margin-bottom: 20px;">
+        <h4 style="margin:0; color: #343a40;">Fonte de Dados: STUCK ORDERS MANAUS V1</h4>
+        <p style="margin:5px 0; color: #6c757d;">O sistema está lendo as abas diretamente. Para alterar os dados, utilize o link abaixo:</p>
+        <a href="{BASE_URL}/edit" target="_blank" style="text-decoration: none;">
+            <button style="background-color: #007bff; color: white; border: none; padding: 8px 16px; border-radius: 4px; cursor: pointer; font-weight: bold;">
+                🔗 Abrir Planilha Original
+            </button>
         </a>
     </div>
 """, unsafe_allow_html=True)
 
-@st.cache_data(ttl=300) # Cache de 5 minutos
-def buscar_dados_v1(url):
+@st.cache_data(ttl=300)
+def leitura_direta_sheets(gid):
+    # Esta URL "hackeia" o link de edição e o transforma em um link de exportação direta
+    url_export = f"{BASE_URL}/export?format=csv&gid={gid}"
     try:
-        # storage_options={'User-Agent': 'Mozilla/5.0'} evita bloqueios de leitura automática
-        return pd.read_csv(url, storage_options={'User-Agent': 'Mozilla/5.0'})
+        # User-Agent necessário para evitar que o Google identifique como robô e bloqueie
+        return pd.read_csv(url_export, storage_options={'User-Agent': 'Mozilla/5.0'})
     except Exception as e:
+        st.error(f"Erro ao ler aba (GID {gid}): {e}")
         return None
 
 # --- PROCESSAMENTO ---
-with st.spinner("Sincronizando com a base Manaus..."):
-    df_p = buscar_dados_v1(LINKS_PLANILHAS["Parcel"])
-    df_f = buscar_dados_v1(LINKS_PLANILHAS["Forward"])
-    df_r = buscar_dados_v1(LINKS_PLANILHAS["Return"])
+with st.spinner("Sincronizando dados diretamente do Sheets..."):
+    df_p = leitura_direta_sheets(GIDS["Parcel"])
+    df_f = leitura_direta_sheets(GIDS["Forward"])
+    df_r = leitura_direta_sheets(GIDS["Return"])
 
-# Validação e Cruzamento
 if all(df is not None for df in [df_p, df_f, df_r]):
     
-    # 1. Unificar pedidos (Forward + Return)
-    df_pedidos = pd.concat([df_f, df_r], ignore_index=True)
+    # 1. União das abas de pedidos
+    df_total_pedidos = pd.concat([df_f, df_r], ignore_index=True)
     
-    # 2. Merge com a aba Parcel usando os Tracking Numbers
-    # Nota: No seu arquivo, a aba Parcel usa 'SPX Tracking Number' 
-    base_final = pd.merge(
-        df_pedidos,
-        df_p[['SPX Tracking Number', 'Operator', 'Aging Time', 'Next Step Action', 'Scanned Status']],
+    # 2. Cruzamento (Merge) usando os nomes de colunas do seu projeto
+    # Verificamos se as colunas existem antes do merge para evitar erros
+    colunas_necessarias = ['SPX Tracking Number', 'Operator', 'Aging Time', 'Next Step Action']
+    df_p_clean = df_p[[c for c in colunas_necessarias if c in df_p.columns]]
+
+    df_final = pd.merge(
+        df_total_pedidos,
+        df_p_clean,
         left_on='SLS Tracking Number',
         right_on='SPX Tracking Number',
         how='left'
     )
 
-    # 3. Lógica de Aging (Transformação em numérico para classificação)
-    base_final['Aging_Num'] = pd.to_numeric(base_final['Aging Time'], errors='coerce').fillna(0)
-    
-    def definir_gravidade(valor):
-        if valor <= 1: return "🟢 Normal (0-24h)"
-        elif valor <= 2: return "🟡 Atenção (24-48h)"
-        else: return "🔴 Crítico (+48h)"
+    # 3. Tratamento de Aging
+    if 'Aging Time' in df_final.columns:
+        df_final['Aging_Numeric'] = pd.to_numeric(df_final['Aging Time'], errors='coerce').fillna(0)
+        df_final['Prioridade'] = df_final['Aging_Numeric'].apply(
+            lambda x: "🟢 Normal" if x <= 1 else ("🟡 Atenção" if x <= 2 else "🔴 CRÍTICA")
+        )
+    else:
+        df_final['Prioridade'] = "N/A"
 
-    base_final['Status de Aging'] = base_final['Aging_Num'].apply(definir_gravidade)
+    # --- EXIBIÇÃO ---
+    kpi1, kpi2, kpi3 = st.columns(3)
+    kpi1.metric("Volume Total", len(df_final))
+    if 'Aging_Numeric' in df_final.columns:
+        kpi2.metric("Críticos (+48h)", len(df_final[df_final['Aging_Numeric'] > 2]))
+    kpi3.metric("Status Sincronismo", "Conectado ✅")
 
-    # --- DASHBOARD ---
-    c1, c2, c3 = st.columns(3)
-    c1.metric("Volume de Carga", len(base_final))
-    c2.metric("Stuck Orders (+48h)", len(base_final[base_final['Aging_Num'] > 2]))
-    c3.metric("Aguardando Operador", base_final['Operator'].isna().sum())
-
-    st.subheader("📋 Relatório Consolidado de Manaus")
+    st.subheader("📋 Relatório Consolidado")
     
-    # Filtro Dinâmico
-    opcoes = base_final['Status de Aging'].unique()
-    filtro = st.multiselect("Filtrar por Criticidade:", opcoes, default=opcoes)
+    # Seleção de colunas para a tabela (ajustado para suas colunas)
+    colunas_view = [c for c in ['Order ID', 'LM Hub Receive time', 'Status', 'Current Station', 'OnHoldReason', 'Aging Time', 'Prioridade', 'Operator'] if c in df_final.columns]
     
-    df_filtrado = base_final[base_final['Status de Aging'].isin(filtro)]
-
-    # Colunas Estratégicas para exibição
-    cols = ['Order ID', 'LM Hub Receive time', 'Status', 'Current Station', 'OnHoldReason', 'Aging Time', 'Status de Aging', 'Operator']
-    
-    st.dataframe(df_filtrado[cols], use_container_width=True, hide_index=True)
+    st.dataframe(df_final[colunas_view], use_container_width=True, hide_index=True)
 
 else:
-    st.error("❌ Não foi possível carregar as abas. Verifique se os GIDs (IDs das abas) na URL permanecem os mesmos.")
+    st.error("⚠️ Falha na comunicação direta. Verifique se a planilha está com acesso liberado para 'Qualquer pessoa com o link'.")
