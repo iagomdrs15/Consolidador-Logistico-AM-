@@ -1,0 +1,13 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Ambientes virtuais
+venv/
+env/
+
+# Arquivos temporários de dados
+*.csv
+*.xlsx
+.streamlit/
