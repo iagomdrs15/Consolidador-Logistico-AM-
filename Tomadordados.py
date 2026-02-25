@@ -5,16 +5,15 @@ from datetime import datetime
 # --- CONFIGURAÇÃO ---
 st.set_page_config(page_title="Gestão Stuck Orders - Porto Velho", layout="wide")
 
-st.title("🚀 Painel de Decisão em Tempo Real")
+st.title("🚀 Painel de Decisão - Consolidação por Status")
 
-# Link fixo configurado para exportação total (XLSX)
 LINK_PLANILHA = "https://docs.google.com/spreadsheets/d/1YHgMyjTzMwi3SgDG-FEpeEhzRCnX3p1NU_QAJMm_3QM/export?format=xlsx"
 
 @st.cache_data(ttl=60)
 def carregar_dados_completos():
     try:
         with pd.ExcelFile(LINK_PLANILHA) as xls:
-            # Carrega as abas e limpa nomes de colunas
+            # Padronização de colunas na leitura
             df_parcel = pd.read_excel(xls, "Parcel").rename(columns=lambda x: str(x).strip())
             df_forward = pd.read_excel(xls, "Forward Order").rename(columns=lambda x: str(x).strip())
             df_return = pd.read_excel(xls, "Return Order").rename(columns=lambda x: str(x).strip())
@@ -31,73 +30,67 @@ def categorizar_macro_aging(dias):
     else: return "Mais de 15 Dias"
 
 # --- PROCESSAMENTO ---
-with st.spinner("Sincronizando dados e calculando indicadores..."):
+with st.spinner("Consolidando status e calculando aging..."):
     df_p, df_f, df_r = carregar_dados_completos()
 
 if df_p is not None:
-    # 1. Unificar Bases (Forward + Return)
+    # 1. Unificar Bases de Pedidos (Forward + Return)
     df_pedidos = pd.concat([df_f, df_r], ignore_index=True)
 
-    # 2. Cruzamento (Merge) para trazer o Operator e Reason (se houver)
+    # 2. Cruzamento (Merge)
+    # Trazemos o 'Final Status' da Parcel para comparar com o 'Status' das ordens
     df_final = pd.merge(
         df_pedidos,
-        df_p[['SPX Tracking Number', 'Operator', 'Next Step Action']],
+        df_p[['SPX Tracking Number', 'Operator', 'Final Status', 'Next Step Action']],
         left_on='SLS Tracking Number',
         right_on='SPX Tracking Number',
         how='left'
     )
 
-    # 3. Cálculo Dinâmico de Aging (Baseado em Current Station Received Time)
+    # 3. Lógica de Consolidação de Status
+    # Priorizamos o 'Final Status' da Parcel. Se estiver vazio, usamos o 'Status' da ordem.
+    df_final['Status_Consolidado'] = df_final['Final Status'].fillna(df_final['Status'])
+    df_final['Status_Consolidado'] = df_final['Status_Consolidado'].replace("", "Sem Status")
+
+    # 4. Cálculo de Aging (Baseado em LM Hub Receive time)
     agora = datetime.now()
-    # Converte para data, forçando o formato dia/mês/ano
     df_final['Received_Date'] = pd.to_datetime(df_final['LM Hub Receive time'], errors='coerce', dayfirst=True)
-    
-    # Diferença em dias
     df_final['Aging_Calculado'] = (agora - df_final['Received_Date']).dt.days.fillna(0).astype(int)
-    
-    # Aplicação do Macro Aging (Sua Fórmula)
     df_final['Macro Aging'] = df_final['Aging_Calculado'].apply(categorizar_macro_aging)
 
-    # 4. Tratamento da Coluna "Reason" (Baseado na sua imagem do dashboard)
-    # Se a coluna Reason não vier da aba, usamos OnHoldReason ou Status como fallback
-    df_final['Reason_Final'] = df_final['OnHoldReason'].fillna("Justificar!")
-    df_final.loc[df_final['Reason_Final'] == "", 'Reason_Final'] = "Justificar!"
-
-    # --- BLOCO 1: MATRIZ RESUMO (Igual à imagem da aba Consolidado) ---
-    st.subheader("📊 Resumo Operacional (Matriz de Aging)")
+    # --- BLOCO 1: MATRIZ RESUMO OPERACIONAL ---
+    st.subheader("📊 Resumo Consolidado: Status vs Aging")
     
     faixas_ordem = ["0 Dias", "1 a 2 Dias", "3 a 7 Dias", "8 a 14 Dias", "Mais de 15 Dias"]
     
-    # Criando a Pivot Table para simular o dashboard
+    # Criando a Pivot Table usando o Status Consolidado
     matriz = pd.crosstab(
-        df_final['Reason_Final'], 
+        df_final['Status_Consolidado'], 
         df_final['Macro Aging'], 
         margins=True, 
         margins_name="TOTAL"
     ).reindex(columns=faixas_ordem + ["TOTAL"], fill_value=0)
 
-    # Estilização para destacar o "Justificar!" e cores críticas
-    def style_matrix(v):
-        if v > 0: return 'color: red; font-weight: bold;'
-        return 'color: #888;'
+    # Estilização Heatmap (Cores para destacar volumes)
+    st.dataframe(matriz.style.background_gradient(cmap='YlOrRd', axis=None), use_container_width=True)
 
-    st.table(matriz.style.applymap(style_matrix))
-
-    # --- BLOCO 2: LISTA DETALHADA ---
+    # --- BLOCO 2: LISTA PARA AÇÃO ---
     st.markdown("---")
-    st.subheader("📋 Detalhamento Stuck Orders")
+    st.subheader("📋 Lista de Trabalho (Ação Imediata)")
     
-    col_view = ['Order ID', 'LM Hub Receive time', 'Status', 'Reason_Final', 'Aging_Calculado', 'Macro Aging', 'Operator']
+    col_view = ['Order ID', 'Status_Consolidado', 'Aging_Calculado', 'Macro Aging', 'Operator', 'Next Step Action']
     
-    # Filtro rápido
-    filtro = st.multiselect("Filtrar por Faixa:", faixas_ordem, default=faixas_ordem[1:])
-    df_view = df_final[df_final['Macro Aging'].isin(filtro)]
+    # Filtro por Status
+    lista_status = df_final['Status_Consolidado'].unique().tolist()
+    status_selecionado = st.multiselect("Filtrar por Status:", lista_status, default=lista_status)
+    
+    df_exibicao = df_final[df_final['Status_Consolidado'].isin(status_selecionado)]
     
     st.dataframe(
-        df_view[col_view].sort_values(by='Aging_Calculado', ascending=False),
+        df_exibicao[col_view].sort_values(by='Aging_Calculado', ascending=False),
         use_container_width=True,
         hide_index=True
     )
 
 else:
-    st.info("Conecte a planilha para visualizar o dashboard.")
+    st.info("Aguardando leitura da planilha...")
