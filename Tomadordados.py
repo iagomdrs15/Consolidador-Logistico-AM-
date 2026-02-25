@@ -1,81 +1,74 @@
 import streamlit as st
 import pandas as pd
-from datetime import datetime
 
-st.set_page_config(page_title="Consolidador de Decisão - Milorde", layout="wide")
+# --- CONFIGURAÇÃO DA PÁGINA ---
+st.set_page_config(page_title="Consolidador Online - Milorde", layout="wide")
 
-st.title("📊 Inteligência de Dados & Tomada de Decisão")
-st.markdown("---")
+# --- LINKS DAS PLANILHAS (Substitua pelos seus links de publicação CSV) ---
+# Dica: No Google Sheets: Arquivo > Compartilhar > Publicar na Web > Escolha a Aba > Formato CSV
+LINKS_PLANILHAS = {
+    "Parcel": "URL_AQUI_ABA_PARCEL_CSV",
+    "Forward": "URL_AQUI_ABA_FORWARD_CSV",
+    "Return": "URL_AQUI_ABA_RETURN_CSV"
+}
 
-# 1. UPLOAD DOS ARQUIVOS
-st.sidebar.header("Upload de Dados")
-uploaded_file = st.sidebar.file_uploader("Selecione o arquivo Excel com as 3 abas", type=["xlsx"])
+# Link direto para edição humana (O link normal da planilha)
+LINK_EDICAO = "https://docs.google.com/spreadsheets/d/1YHgMyjTzMwi3SgDG-FEpeEhzRCnX3p1NU_QAJMm_3QM/edit?gid=240810884#gid=240810884"
 
-if uploaded_file:
+st.title("📊 Painel de Decisão em Tempo Real")
+
+# Botão centralizado para acesso rápido à edição
+st.markdown(f"""
+    <div style="text-align: center; background-color: #1e1e1e; padding: 20px; border-radius: 10px; border: 1px solid #ff4b4b; margin-bottom: 25px;">
+        <h3 style="color: white; margin-bottom: 15px;">🛠️ Precisa ajustar os dados?</h3>
+        <a href="{LINK_EDICAO}" target="_blank" style="background-color: #ff4b4b; color: white; padding: 10px 20px; text-decoration: none; border-radius: 5px; font-weight: bold;">
+            ABRIR PLANILHA NO GOOGLE SHEETS
+        </a>
+    </div>
+""", unsafe_allow_html=True)
+
+@st.cache_data(ttl=600) # Atualiza os dados a cada 10 minutos
+def carregar_dados_online(url):
     try:
-        # Lendo as abas
-        df_parcel = pd.read_excel(uploaded_file, sheet_name="Parcel")
-        df_forward = pd.read_excel(uploaded_file, sheet_name="Forward Order")
-        df_return = pd.read_excel(uploaded_file, sheet_name="Return Order")
-
-        st.success("✅ Abas 'Parcel', 'Forward' e 'Return' carregadas com sucesso!")
-
-        # 2. CONSOLIDAÇÃO (MERGE)
-        # Unimos Forward e Return (empilhando uma abaixo da outra)
-        df_orders = pd.concat([df_forward, df_return], ignore_index=True)
-
-        # Cruzamos com a aba Parcel usando o Tracking Number
-        # Nota: Ajuste os nomes das colunas se houver espaços extras
-        df_consolidado = pd.merge(
-            df_orders, 
-            df_parcel[['SPX Tracking Number', 'Scanned Status', 'Operator', 'Aging Time', 'Next Step Action']], 
-            left_on='SLS Tracking Number', 
-            right_on='SPX Tracking Number', 
-            how='left'
-        )
-
-        # 3. CRIAÇÃO DAS COLUNAS DE DECISÃO
-        # Exemplo de Macro Aging (Tratando como numérico)
-        df_consolidado['Aging Days'] = pd.to_numeric(df_consolidado['Aging Time'], errors='coerce')
-        
-        def definir_macro_aging(days):
-            if days <= 1: return "🟢 0-24h"
-            elif days <= 2: return "🟡 24-48h"
-            else: return "🔴 +48h"
-
-        df_consolidado['Macro Aging'] = df_consolidado['Aging Days'].apply(definir_macro_aging)
-
-        # 4. EXIBIÇÃO DOS RESULTADOS
-        st.subheader("📋 Visão Consolidada para Decisão")
-        
-        # Filtros rápidos
-        col1, col2 = st.columns(2)
-        with col1:
-            filtro_status = st.multiselect("Filtrar por Status", df_consolidado['Status'].unique())
-        with col2:
-            filtro_macro = st.multiselect("Filtrar por Macro Aging", df_consolidado['Macro Aging'].unique())
-
-        # Aplicando filtros
-        df_final = df_consolidado.copy()
-        if filtro_status:
-            df_final = df_final[df_final['Status'].isin(filtro_status)]
-        if filtro_macro:
-            df_final = df_final[df_final['Macro Aging'].isin(filtro_macro)]
-
-        # Seleção das colunas que o senhor pediu
-        colunas_exibicao = [
-            'Order ID', 'LM Hub Receive time', 'Status', 'Current Station', 
-            'Destination Hub', 'OnHoldReason', 'Aging Time', 'Macro Aging', 'Operator'
-        ]
-        
-        st.dataframe(df_final[colunas_exibicao], use_container_width=True)
-
-        # Botão para baixar o resultado
-        csv = df_final.to_csv(index=False).encode('utf-8')
-        st.download_button("📥 Baixar Base Consolidada (CSV)", csv, "consolidado.csv", "text/csv")
-
+        return pd.read_csv(url)
     except Exception as e:
-        st.error(f"Erro ao processar: {e}")
-        st.info("Certifique-se de que os nomes das abas e colunas estão idênticos aos descritos.")
+        return None
+
+# --- PROCESSAMENTO ---
+with st.spinner("Sincronizando com o Google Sheets..."):
+    df_p = carregar_dados_online(LINKS_PLANILHAS["Parcel"])
+    df_f = carregar_dados_online(LINKS_PLANILHAS["Forward"])
+    df_r = carregar_dados_online(LINKS_PLANILHAS["Return"])
+
+if df_p is not None and df_f is not None and df_r is not None:
+    # Unificar bases
+    df_pedidos = pd.concat([df_f, df_r], ignore_index=True)
+    
+    # Merge com Parcel
+    base_final = pd.merge(
+        df_pedidos,
+        df_p[['SPX Tracking Number', 'Operator', 'Aging Time', 'Next Step Action']],
+        left_on='SLS Tracking Number',
+        right_on='SPX Tracking Number',
+        how='left'
+    )
+
+    # Lógica de Aging
+    base_final['Aging_Num'] = pd.to_numeric(base_final['Aging Time'], errors='coerce').fillna(0)
+    base_final['Macro Aging'] = base_final['Aging_Num'].apply(
+        lambda x: "🟢 0-24h" if x <= 1 else ("🟡 24-48h" if x <= 2 else "🔴 +48h")
+    )
+
+    # --- EXIBIÇÃO ---
+    st.subheader("📋 Relatório Consolidado")
+    
+    cols_exibicao = [
+        'Order ID', 'LM Hub Receive time', 'Status', 'Current Station', 
+        'OnHoldReason', 'Aging Time', 'Macro Aging', 'Operator'
+    ]
+    
+    st.dataframe(base_final[cols_exibicao], use_container_width=True)
+    st.success(f"Dados sincronizados com sucesso às {pd.Timestamp.now().strftime('%H:%M:%S')}")
+
 else:
-    st.info("Aguardando upload do arquivo Excel para processar os dados...")
+    st.error("Erro ao conectar com as planilhas. Verifique se os links de 'Publicar na Web' estão corretos.")
