@@ -2,81 +2,61 @@ import streamlit as st
 import pandas as pd
 
 # --- CONFIGURAÇÃO DA INTERFACE ---
-st.set_page_config(page_title="Consolidador Logístico - Manaus", layout="wide")
+st.set_page_config(page_title="Consolidador Manaus V1", layout="wide")
 
-st.title("📊 Painel de Decisão Logística - Manaus V1")
+st.title("📊 Painel de Decisão Logística - Manaus")
 
-# Entrada do link único conforme solicitado
-url_input = st.text_input(
-    "Insira o link da planilha Google Sheets:", 
-    placeholder="https://docs.google.com/spreadsheets/d/1YHgMyjTzMwi3SgDG-FEpeEhzRCnX3p1NU_QAJMm_3QM/edit..."
-)
+# Link fixo da sua planilha (ajustado para exportação total)
+# O Pandas usará este link para tentar ler as abas pelo nome
+LINK_PLANILHA = "https://docs.google.com/spreadsheets/d/1YHgMyjTzMwi3SgDG-FEpeEhzRCnX3p1NU_QAJMm_3QM/edit?gid=0#gid=0"
 
-if url_input:
+@st.cache_data(ttl=300)
+def carregar_dados_completos():
     try:
-        # Extração do ID da planilha (Sheet ID)
-        sheet_id = url_input.split("/d/")[1].split("/")[0]
-        
-        # Mapeamento fixo dos GIDs das abas do seu projeto
-        GIDS = {
-            "Parcel": "240810884",
-            "Forward": "663185324",
-            "Return": "1119561081"
-        }
+        # Lendo o arquivo Excel (XLSX) que contém todas as abas
+        with pd.ExcelFile(LINK_PLANILHA) as xls:
+            # Busca as abas pelos nomes exatos que estão na planilha
+            df_parcel = pd.read_excel(xls, "Parcel")
+            df_forward = pd.read_excel(xls, "Forward Order")
+            df_return = pd.read_excel(xls, "Return Order")
+        return df_parcel, df_forward, df_return
+    except Exception as e:
+        st.error(f"Erro ao acessar a planilha: {e}")
+        return None, None, None
 
-        def carregar_aba(gid):
-            # Formata a URL para exportação direta em CSV para o Pandas
-            url = f"https://docs.google.com/spreadsheets/d/{sheet_id}/export?format=csv&gid={gid}"
-            return pd.read_csv(url)
+# --- PROCESSAMENTO ---
+with st.spinner("Sincronizando dados de Manaus..."):
+    df_p, df_f, df_r = carregar_dados_completos()
 
-        with st.spinner("Processando dados das abas..."):
-            # Leitura individual de cada aba
-            df_p = carregar_aba(GIDS["Parcel"])
-            df_f = carregar_aba(GIDS["Forward"])
-            df_r = carregar_aba(GIDS["Return"])
+if df_p is not None:
+    # 1. Consolidação (União de Forward e Return)
+    df_pedidos = pd.concat([df_f, df_r], ignore_index=True)
 
-            # 1. Consolidação (União de Forward e Return)
-            df_pedidos = pd.concat([df_f, df_r], ignore_index=True)
+    # 2. Cruzamento de Dados (Merge)
+    # Aqui o sistema une as informações usando os códigos de rastreio
+    df_final = pd.merge(
+        df_pedidos,
+        df_p[['SPX Tracking Number', 'Operator', 'Aging Time']],
+        left_on='SLS Tracking Number',
+        right_on='SPX Tracking Number',
+        how='left'
+    )
 
-            # 2. Cruzamento (Merge) entre pedidos e triagem
-            # Usando SLS Tracking Number como chave de ligação
-            df_final = pd.merge(
-                df_pedidos,
-                df_p[['SPX Tracking Number', 'Operator', 'Aging Time']],
-                left_on='SLS Tracking Number',
-                right_on='SPX Tracking Number',
-                how='left'
-            )
+    # 3. Métricas Rápidas
+    df_final['Aging_Num'] = pd.to_numeric(df_final['Aging Time'], errors='coerce').fillna(0)
+    
+    c1, c2, c3 = st.columns(3)
+    c1.metric("Volume Total", len(df_final))
+    c2.metric("Críticos (+48h)", len(df_final[df_final['Aging_Num'] > 2]))
+    c3.metric("Atualização", "Tempo Real")
 
-            # 3. Tratamento de Aging (Numérico para cálculos)
-            df_final['Aging_Num'] = pd.to_numeric(df_final['Aging Time'], errors='coerce').fillna(0)
+    # --- EXIBIÇÃO ---
+    st.markdown("---")
+    st.subheader("📋 Relatório Consolidado")
+    
+    # Seleção de colunas estratégicas
+    colunas_view = ['Order ID', 'Status', 'Current Station', 'Aging Time', 'Operator']
+    st.dataframe(df_final[colunas_view], use_container_width=True, hide_index=True)
 
-            # --- EXIBIÇÃO DE RESULTADOS ---
-            m1, m2, m3 = st.columns(3)
-            m1.metric("Volume de Carga", len(df_final))
-            m2.metric("Stuck Orders (+48h)", len(df_final[df_final['Aging_Num'] > 2]))
-            m3.metric("Status", "Sincronizado ✅")
-
-            st.markdown("---")
-            
-            # Filtro por Operador para facilitar a gestão
-            operadores = df_final['Operator'].unique().tolist()
-            filtro_op = st.multiselect("Filtrar por Operador:", operadores)
-
-            df_tabela = df_final
-            if filtro_op:
-                df_tabela = df_final[df_final['Operator'].isin(filtro_op)]
-
-            # Visualização das colunas estratégicas
-            cols = ['Order ID', 'Status', 'Current Station', 'Aging Time', 'Operator']
-            st.subheader("📋 Relatório Consolidado para Decisão")
-            st.dataframe(df_tabela[cols], use_container_width=True, hide_index=True)
-
-            # Exportação
-            csv = df_final.to_csv(index=False).encode('utf-8')
-            st.download_button("📥 Baixar Relatório Completo (CSV)", csv, "relatorio_manaus.csv", "text/csv")
-
-    except Exception:
-        st.error("⚠️ Erro de leitura. Certifique-se de que o acesso está como 'Qualquer pessoa com o link' (Leitor).")
 else:
-    st.info("Aguardando a inserção do link para consolidar os dados.")
+    st.info("Por favor, verifique se a planilha está com o acesso liberado para 'Qualquer pessoa com o link'.")
